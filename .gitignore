@@ -1,0 +1,24 @@
+# Compiled TypeScript output (tsc compiles in-place; source .js under
+# src/lambda and src/canaries is hand-written and must NOT be ignored)
+/lib/**/*.js
+/lib/**/*.d.ts
+/bin/**/*.js
+/bin/**/*.d.ts
+/test/**/*.js
+/test/**/*.d.ts
+!jest.config.js
+
+# Dependency directories (top-level and per-package installs).
+# Does NOT match src/canaries/*/nodejs/node_modules, which is the
+# required CloudWatch Synthetics source layout, not an npm install.
+/node_modules
+/src/lambda/*/node_modules
+
+.env
+.DS_Store
+cdk.out
+cdk.context.json
+*.log
+coverage
+dist
+build

@@ -1,0 +1,337 @@
+# Synthetic Canary → AWS DevOps Agent
+
+Route CloudWatch Synthetics canary/alarm failures straight into an automated
+[AWS DevOps Agent](https://aws.amazon.com/devops-agent/) investigation — no
+human has to notice the page, open a ticket, or start digging before root
+cause analysis begins.
+
+```
+CloudWatch Synthetics canary  --(SuccessPercent alarm)-->  EventBridge (default bus)
+   (Health canary / UX canary)                                    |
+                                                                    v
+                                              Webhook Lambda (dedup + HMAC-sign)
+                                                                    |
+                                              +---------------------+---------------------+
+                                              v                                           v
+                                   AWS DevOps Agent (primary)                  Slack (fallback, on failure)
+
+                                              (alarm stays unresolved?)
+                                                                    |
+                                                                    v
+                              EventBridge (default bus) --> Step Function (RepeatedNotification)
+                                                                    |
+                                                    Wait --> DescribeAlarms --> still ALARM?
+                                                     ^                              |
+                                                     +------------------------------+
+                                                                    |
+                                                     re-emits a synthetic alarm event
+                                                     --> back into the same Webhook Lambda rule above
+```
+
+## Why this exists
+
+Most outside-in monitoring stops at "is the alarm red or green." This project
+closes the gap between *detection* and *investigation*:
+
+- **Two complementary canaries.** A `HealthCanary` does outside-in API health
+  checks (HTTP status, following redirects correctly, so a healthy CloudFront
+  302 isn't misreported as a failure). A `UxCanary` drives a real headless
+  browser through a configurable page journey and asserts that expected
+  *content* rendered — catching failures that come back as an HTTP 200 with a
+  server-rendered error banner in place of real content, which no
+  status-code check can ever see.
+- **A signed, retried, deduplicated routing path.** CloudWatch alarms land on
+  the account's default EventBridge bus. A small webhook Lambda picks them
+  up, deduplicates concurrent/duplicate ALARM events via a DynamoDB
+  conditional-put lock, and POSTs an HMAC-signed payload to AWS DevOps Agent
+  with retry + exponential backoff, falling back to a Slack notification if
+  the agent can't be reached.
+- **No proprietary error-string matching.** The UX canary's content checks
+  are structural (does the expected element exist and is it visible) and
+  its network/JS-error checks are fully generic — it never depends on any
+  application's specific error copy, so it works against a page whose error
+  message you've never seen.
+- **Sustained incidents keep getting surfaced, not just the first occurrence.**
+  CloudWatch alarms are edge-triggered — EventBridge only fires on the
+  *transition* into ALARM, not on every evaluation while it stays there. The
+  optional `RepeatedNotification` construct closes that gap with a Step
+  Function that periodically re-checks the alarm and re-invokes the same
+  webhook path while the incident remains unresolved.
+- **Fewer false-positive investigations from one-off blips.** Both canaries
+  support CloudWatch Synthetics' native `maxRetries` — a single transient
+  failure (a slow DNS lookup, one flaky response) gets retried before the
+  run counts against the availability alarm, so it never reaches DevOps
+  Agent at all.
+
+## What's in this repo
+
+| Path | What it is |
+|---|---|
+| `lib/constructs/lambda.ts` | `BaseLambdaFunction` — shared Lambda scaffolding (DLQ, X-Ray, log group, least-privilege role) |
+| `lib/constructs/canary.ts` | `BaseCanary` — shared Synthetics canary scaffolding (IAM role, artifacts bucket, schedule, X-Ray) |
+| `lib/canaries/health-canary.ts` | `HealthCanary` construct |
+| `lib/canaries/ux-canary.ts` | `UxCanary` construct |
+| `lib/webhook-function.ts` | `WebhookFunction` construct (EventBridge rule + Lambda + IAM) |
+| `lib/investigation-locks-table.ts` | `InvestigationLocksTable` construct (DynamoDB dedup table) |
+| `lib/repeated-notification.ts` | `RepeatedNotification` construct (Step Function + check Lambda; optional, see [below](#repeated-notification-for-sustained-alarms)) |
+| `lib/triage-stack.ts` | Reference stack wiring everything together — copy/adapt, don't depend on as a black box |
+| `src/canaries/health/` | Health canary Lambda source (Synthetics `syn-nodejs-puppeteer-11.0` handler) |
+| `src/canaries/ux/` | UX canary Lambda source |
+| `src/lambda/webhook-node/` | Webhook Lambda source |
+| `src/lambda/repeat-notification-node/` | Repeated-notification check Lambda source |
+| `test/` | Unit + infra tests for all of the above |
+
+## Quick start
+
+```bash
+npm install
+npm test        # unit + infra tests, no AWS credentials or Docker required
+```
+
+To deploy the reference stack, edit `bin/app.ts` with your target
+application's URL(s) and selectors, then:
+
+```bash
+npx cdk bootstrap   # once per account/region
+npx cdk deploy
+```
+
+After deploying, populate the two placeholder secrets it creates:
+
+```bash
+aws secretsmanager put-secret-value \
+  --secret-id l1t-devops-agent-webhook \
+  --secret-string '{"webhookUrl":"https://...","hmacSecret":"..."}'
+
+aws secretsmanager put-secret-value \
+  --secret-id l1t-slack-webhook \
+  --secret-string '{"webhookUrl":"https://hooks.slack.com/..."}'
+```
+
+The webhook Lambda treats a secret whose `webhookUrl` still contains the
+literal string `PLACEHOLDER` as "not yet configured" and skips invocation —
+so it's safe to deploy before you have real webhook credentials.
+
+### Getting a DevOps Agent webhook URL + HMAC secret
+
+Create an AWS DevOps Agent (Agent Space) and configure a generic webhook
+trigger with HMAC signing enabled; the agent gives you the webhook URL and
+HMAC secret to use above. See the AWS DevOps Agent documentation for
+"Invoking DevOps Agent through Webhook" for the exact console steps — the
+webhook Lambda in this repo implements that contract exactly (HMAC-SHA256
+over `${timestamp}:${body}`, base64-encoded, sent as the
+`x-amzn-event-signature` header alongside `x-amzn-event-timestamp`).
+
+## Configuring the UX canary's journey
+
+The UX canary visits a home page plus any number of additional pages you
+configure. Each journey page is:
+
+```ts
+{
+  name: 'catalog',                 // step name, used in logs and screenshots
+  path: '/catalog',                // appended to the base URL
+  contentSelector: '.item-card',   // must be present (and the page considered healthy)
+  emptyStateSelector: '.empty',    // optional: a valid "no data yet" state, not a failure
+  extraQuery: 'category=all',      // optional: extra query string
+}
+```
+
+Pass an array of these to `UxCanary`'s `journeyPages` prop (or point
+`journeyPagesParameterName` at an SSM parameter holding the same JSON, if you
+want to update the journey without redeploying).
+
+```ts
+new UxCanary(this, 'UxCanary', {
+    name: 'l1t-ux-canary',
+    runtime: puppeteerRuntime,
+    handler: 'index.handler',
+    path: '../src/canaries/ux',
+    targetUrl: 'https://your-app.example.com',
+    keySelector: 'body',
+    journeyPages: [
+        { name: 'catalog', path: '/catalog', contentSelector: '.item-card', emptyStateSelector: '.empty' },
+        { name: 'cart', path: '/cart', contentSelector: '#cart-summary' },
+    ],
+});
+```
+
+### Beyond page loads: checking the write/transactional path with `steps`
+
+A positive content selector and network/JS-error checks verify that a page
+*renders* correctly — the read path. Many real outages live on the
+write/transactional path instead: the page loads fine, but "Add to Cart"
+silently does nothing, or a form submit 500s. A pure navigate-and-assert
+check can never observe that, because nothing is ever clicked or submitted.
+
+Add an optional `steps` array to a journey page to describe an ordered
+sequence of interactions, run after navigating to `path` and before the
+(optional) content assertion:
+
+```ts
+{
+  name: 'add-to-cart',
+  path: '/catalog',
+  steps: [
+    { action: 'click', selector: '.add-to-cart-btn' },
+    { action: 'assertVisible', selector: '.cart-badge' },
+  ],
+}
+```
+
+Supported actions: `click`, `type` (with an optional `value`/`delay`),
+`waitForSelector` (DOM presence only), and `assertVisible` (presence *and*
+visibility, like the existing error-indicator check). Each accepts an
+optional `timeout` (default 10000ms). The first failing step throws
+immediately, identifying its index and action (e.g. `step[1] click
+(.checkout-btn) failed: ...`), so the investigation gets a precise failure
+point rather than "page broke somewhere." The existing network/JS-error
+listeners already span the whole page visit — including step execution —
+so a click-triggered backend failure is caught by the exact same generic
+mechanism that catches load-time failures, with no extra wiring.
+
+`contentSelector` is optional when `steps` ends in its own
+`assertVisible`/`waitForSelector` step that already serves as the success
+signal; combine both when you want to reach a piece of UI via interaction
+and then assert on it separately.
+
+**Not supported: authentication/session flows.** There is no login-step
+primitive — filling credentials, submitting a login form, handling MFA, or
+persisting a session/cookie across separate canary runs is out of scope for
+this project today. If your journey pages sit behind a login wall, this is a
+real gap you'd need to close yourself (or contribute) before this pattern
+can reach them; it is a legitimate, bounded extension (a `login` step type
+that authenticates once and reuses the resulting page/cookie for the rest of
+the journey) that just hasn't been built.
+
+## Reducing false positives with `maxRetries`
+
+Both `HealthCanary` and `UxCanary` accept a `maxRetries` property (0-2),
+which maps directly to CloudWatch Synthetics' native automatic-retry
+support (`Runtime.SYNTHETICS_NODEJS_PUPPETEER_10_0` and newer — this
+project's `syn-nodejs-puppeteer-11.0` runtime qualifies). A failed canary
+run is retried up to `maxRetries` times before it's reported as a failure,
+so a single transient blip (a slow DNS lookup, one flaky network response)
+doesn't count against the `SuccessPercent` metric an availability alarm
+evaluates — and never reaches DevOps Agent as a false-positive
+investigation.
+
+```ts
+new HealthCanary(this, 'HealthCanary', {
+    // ...
+    maxRetries: 1,
+});
+```
+
+Leave it unset (default `0`) if you'd rather have every failed run count
+immediately — useful while you're first validating a canary's checks.
+
+## Repeated notification for sustained alarms
+
+CloudWatch alarms are edge-triggered: EventBridge only receives a "CloudWatch
+Alarm State Change" event on the *transition* into ALARM, not on every
+evaluation while the alarm remains there. Without anything extra, a
+long-running unresolved incident only ever triggers **one** DevOps Agent
+investigation, even if it stays broken for hours.
+
+The optional `RepeatedNotification` construct closes this gap, adapting the
+pattern from the AWS blog post ["How to enable Amazon CloudWatch Alarms to
+send repeated
+notifications"](https://aws.amazon.com/blogs/mt/how-to-enable-amazon-cloudwatch-alarms-to-send-repeated-notifications/)
+(EventBridge → Step Functions → Lambda, with a Wait/Check/Choice loop) —
+adapted to re-invoke the *same* webhook path instead of publishing to SNS:
+
+1. A matching alarm (by name prefix) transitions to ALARM, which starts a
+   Step Function via its own EventBridge rule (separate from — but using the
+   same alarm-name prefix as — `WebhookFunction`'s rule).
+2. The state machine waits `repeatIntervalSeconds` (default 300s), then
+   invokes a small check Lambda that calls `DescribeAlarms`.
+3. If the alarm is still in `ALARM`, the check Lambda re-emits a synthetic
+   "CloudWatch Alarm State Change" event onto the default EventBridge bus —
+   identical in shape to a real transition. That event flows through the
+   *same* `WebhookFunction` rule, dedup lock, HMAC signing, retry, and Slack
+   fallback as a genuine occurrence, with zero special-casing needed in the
+   webhook Lambda itself.
+4. This repeats until the alarm resolves, or `maxRepeats` (default 12, i.e.
+   ~1 hour at the default interval) is exhausted.
+
+```ts
+new TriageStack(app, 'MyTriageStack', {
+    // ...
+    repeatedNotification: {
+        repeatIntervalSeconds: 300, // should be >= the webhook Lambda's dedupTtlSeconds (default 900s)
+                                     // so each repeat actually reaches DevOps Agent again, rather than
+                                     // being silently deduplicated by the lock
+        maxRepeats: 12,
+    },
+});
+```
+
+Or instantiate `RepeatedNotification` directly if you're not using
+`TriageStack` — it only needs the alarm-name prefix your alarms and
+`WebhookFunction` already share.
+
+## Trying it against a real app: `one-observability-demo`
+
+This project is intentionally application-agnostic — it doesn't ship or
+depend on any particular demo app. To see the whole pattern working
+end-to-end against real infrastructure and real (not synthetic) failures,
+deploy [aws-samples/one-observability-demo](https://github.com/aws-samples/one-observability-demo),
+a polyglot pet-adoption microservices app built for the AWS observability
+workshop, and point this project's canaries at it:
+
+- `HealthCanary.targetUrlsParameterName` → the app's PetSite URL SSM
+  parameter (exported by the app's stacks).
+- `UxCanary.targetUrl` → the same PetSite URL.
+- `UxCanary.keySelector` → a selector present on the app's home page.
+- `UxCanary.journeyPages` → the app's own nav pages (adoption list, food
+  shop, etc.), each with its real content selector.
+
+Then break something for real — scale an ECS service to zero, stop an EKS
+node group, or introduce an actual code bug — and watch the health canary or
+UX canary catch it, the alarm fire, the webhook Lambda dedupe and forward it,
+and AWS DevOps Agent produce a root-cause investigation without anyone
+opening a ticket.
+
+`one-observability-demo` is a reference target for trying this pattern, not
+a dependency of this repo — none of its code is vendored here, and none of
+this repo's code lives in it.
+
+## Design notes
+
+- **Alarm routing uses the account's *default* EventBridge bus.** CloudWatch
+  delivers alarm state-change events there, not to any custom bus you might
+  create — `WebhookFunction` wires its rule to `EventBus.fromEventBusName(...,
+  'default')` accordingly.
+- **Deduplication is TTL-based, not distributed-lock-based.** A DynamoDB
+  conditional put on `canaryName` with an `expiresAt` TTL attribute is
+  sufficient for this use case (bursty repeated ALARM events for the same
+  underlying incident) without needing a full distributed lock service.
+- **CloudWatch alarms are edge-triggered, not level-triggered.** A sustained
+  ALARM state does not re-fire the EventBridge event on every evaluation —
+  only the *transition* into ALARM does. The optional `RepeatedNotification`
+  construct (see [above](#repeated-notification-for-sustained-alarms)) closes
+  this gap by periodically re-checking the alarm and re-invoking the webhook
+  path while it remains unresolved.
+- **The repeated-notification check Lambda re-emits synthetic events rather
+  than calling the webhook Lambda directly.** Routing back through
+  EventBridge (instead of a direct Lambda-to-Lambda invocation) means the
+  repeat check reuses `WebhookFunction`'s existing dedup lock, HMAC signing,
+  retry, and Slack fallback verbatim — no parallel code path to keep in
+  sync.
+- **The UX canary's error-indicator check is corroborating evidence only.**
+  The primary signal is always "did the expected content render." A
+  `.alert-danger`-style secondary check adds evidence but the canary never
+  fails *solely* on the secondary check's absence, and it requires the
+  element to be *visible* (not just present in the DOM) — many templates
+  render a hidden, empty error placeholder on every page load.
+
+## Security
+
+See [CONTRIBUTING](CONTRIBUTING.md#security-issue-notifications) for how to
+report a security issue.
+
+## License
+
+This project is licensed under the MIT-0 License. See the [LICENSE](LICENSE)
+file.

@@ -1,0 +1,14 @@
+{
+    "name": "repeat-notification-node",
+    "version": "1.0.0",
+    "description": "Repeat-notification check Lambda: re-emits a synthetic alarm event while an alarm remains in a sustained ALARM state",
+    "main": "index.js",
+    "license": "MIT-0",
+    "dependencies": {
+        "@aws-sdk/client-cloudwatch": "^3.700.0",
+        "@aws-sdk/client-eventbridge": "^3.700.0"
+    },
+    "engines": {
+        "node": ">=22.0.0"
+    }
+}
