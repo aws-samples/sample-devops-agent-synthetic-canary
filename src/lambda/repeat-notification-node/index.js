@@ -21,8 +21,9 @@ SPDX-License-Identifier: Apache-2.0
  *   3. Otherwise, re-emits a synthetic "CloudWatch Alarm State Change" event
  *      onto the account default EventBridge bus — identical in shape to a
  *      real alarm transition, so it flows through the *same* webhook Lambda
- *      rule, dedup lock, HMAC signing, retry, and Slack-fallback logic as a
- *      fresh occurrence, without any special-casing in that Lambda.
+ *      rule, dedup lock, HMAC signing, retry, and invocation-failure SNS
+ *      alert logic as a fresh occurrence, without any special-casing in
+ *      that Lambda.
  *
  * Re-notification only actually reaches AWS DevOps Agent again once the
  * webhook Lambda's dedup lock (keyed by the derived canary/source name) has

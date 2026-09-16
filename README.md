@@ -13,7 +13,8 @@ CloudWatch Synthetics canary  --(SuccessPercent alarm)-->  EventBridge (default 
                                                                     |
                                               +---------------------+---------------------+
                                               v                                           v
-                                   AWS DevOps Agent (primary)                  Slack (fallback, on failure)
+                        AWS DevOps Agent (primary; posts findings           SNS (invocation-failure alert,
+                        to Slack natively, console-configured)              only if the Agent is unreachable)
 
                                               (alarm stays unresolved?)
                                                                     |
@@ -44,8 +45,11 @@ closes the gap between *detection* and *investigation*:
   the account's default EventBridge bus. A small webhook Lambda picks them
   up, deduplicates concurrent/duplicate ALARM events via a DynamoDB
   conditional-put lock, and POSTs an HMAC-signed payload to AWS DevOps Agent
-  with retry + exponential backoff, falling back to a Slack notification if
-  the agent can't be reached.
+  with retry + exponential backoff, publishing an SNS invocation-failure
+  alert if the agent can't be reached at all. Routine findings/RCA delivery
+  is handled separately by AWS DevOps Agent's own native Slack integration
+  (console-configured, no code in this repo) — see
+  [`docs/sample-investigation.md`](docs/sample-investigation.md).
 - **No proprietary error-string matching.** The UX canary's content checks
   are structural (does the expected element exist and is it visible) and
   its network/JS-error checks are fully generic — it never depends on any
@@ -62,6 +66,16 @@ closes the gap between *detection* and *investigation*:
   failure (a slow DNS lookup, one flaky response) gets retried before the
   run counts against the availability alarm, so it never reaches DevOps
   Agent at all.
+
+## Seeing it work
+
+This pattern was validated end-to-end against a real incident on the
+[AWS One Observability Workshop](https://catalog.workshops.aws/observability/en-US)'s
+pet adoption sample app — an injected backend failure, detected by the canary, routed through
+the alarm → EventBridge → webhook chain, and investigated autonomously by the AWS DevOps Agent.
+See [`docs/sample-investigation.md`](docs/sample-investigation.md) for the agent's actual
+investigation output (root cause, evidence, and proposed mitigation plan), plus the
+complementary invocation-failure alert path.
 
 ## What's in this repo
 
@@ -96,21 +110,31 @@ npx cdk bootstrap   # once per account/region
 npx cdk deploy
 ```
 
-After deploying, populate the two placeholder secrets it creates:
+After deploying, populate the placeholder secret it creates:
 
 ```bash
 aws secretsmanager put-secret-value \
   --secret-id l1t-devops-agent-webhook \
   --secret-string '{"webhookUrl":"https://...","hmacSecret":"..."}'
-
-aws secretsmanager put-secret-value \
-  --secret-id l1t-slack-webhook \
-  --secret-string '{"webhookUrl":"https://hooks.slack.com/..."}'
 ```
 
 The webhook Lambda treats a secret whose `webhookUrl` still contains the
 literal string `PLACEHOLDER` as "not yet configured" and skips invocation —
 so it's safe to deploy before you have real webhook credentials.
+
+Also subscribe an endpoint (email, or any other SNS-supported protocol) to
+the invocation-failure topic it creates, so a failure to reach the agent
+doesn't go unnoticed:
+
+```bash
+aws sns subscribe \
+  --topic-arn <the l1t-invocation-failure topic ARN from the stack output/console> \
+  --protocol email \
+  --notification-endpoint you@example.com
+```
+
+SNS requires a one-time click on a confirmation email/link before delivery
+starts for that subscription.
 
 ### Getting a DevOps Agent webhook URL + HMAC secret
 
@@ -249,9 +273,9 @@ adapted to re-invoke the *same* webhook path instead of publishing to SNS:
 3. If the alarm is still in `ALARM`, the check Lambda re-emits a synthetic
    "CloudWatch Alarm State Change" event onto the default EventBridge bus —
    identical in shape to a real transition. That event flows through the
-   *same* `WebhookFunction` rule, dedup lock, HMAC signing, retry, and Slack
-   fallback as a genuine occurrence, with zero special-casing needed in the
-   webhook Lambda itself.
+   *same* `WebhookFunction` rule, dedup lock, HMAC signing, retry, and
+   invocation-failure SNS alert as a genuine occurrence, with zero
+   special-casing needed in the webhook Lambda itself.
 4. This repeats until the alarm resolves, or `maxRepeats` (default 12, i.e.
    ~1 hour at the default interval) is exhausted.
 
@@ -317,8 +341,8 @@ this repo's code lives in it.
   than calling the webhook Lambda directly.** Routing back through
   EventBridge (instead of a direct Lambda-to-Lambda invocation) means the
   repeat check reuses `WebhookFunction`'s existing dedup lock, HMAC signing,
-  retry, and Slack fallback verbatim — no parallel code path to keep in
-  sync.
+  retry, and invocation-failure SNS alert verbatim — no parallel code path
+  to keep in sync.
 - **The UX canary's error-indicator check is corroborating evidence only.**
   The primary signal is always "did the expected content render." A
   `.alert-danger`-style secondary check adds evidence but the canary never

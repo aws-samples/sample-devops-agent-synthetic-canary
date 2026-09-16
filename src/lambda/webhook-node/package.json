@@ -1,7 +1,7 @@
 {
     "name": "webhook-node",
     "version": "1.0.0",
-    "description": "Webhook Lambda: routes CloudWatch alarm events to the AWS DevOps Agent via an HMAC-signed webhook, with dedup and Slack fallback",
+    "description": "Webhook Lambda: routes CloudWatch alarm events to the AWS DevOps Agent via an HMAC-signed webhook, with dedup and an SNS invocation-failure alert",
     "main": "index.js",
     "scripts": {
         "test": "jest",
@@ -12,7 +12,8 @@
     "dependencies": {
         "@aws-sdk/client-dynamodb": "^3.700.0",
         "@aws-sdk/lib-dynamodb": "^3.700.0",
-        "@aws-sdk/client-secrets-manager": "^3.700.0"
+        "@aws-sdk/client-secrets-manager": "^3.700.0",
+        "@aws-sdk/client-sns": "^3.700.0"
     },
     "engines": {
         "node": ">=22.0.0"

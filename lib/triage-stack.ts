@@ -7,8 +7,9 @@ SPDX-License-Identifier: Apache-2.0
  * Example stack wiring the full pattern together:
  *
  *   HealthCanary / UxCanary --(SuccessPercent alarm)--> EventBridge (default bus)
- *     --> WebhookFunction --(HMAC-signed POST)--> AWS DevOps Agent
- *                          --(fallback on failure)--> Slack
+ *     --> WebhookFunction --(HMAC-signed POST)--> AWS DevOps Agent (primary; also posts
+ *                                                  findings to Slack natively, console-configured)
+ *                          --(invocation failure, all retries exhausted)--> SNS
  *
  * This is a reference wiring, not a required entry point — copy and adapt it
  * (or wire the constructs directly in your own stack) rather than depending
@@ -22,6 +23,7 @@ import { Runtime as CanaryRuntime, RuntimeFamily } from 'aws-cdk-lib/aws-synthet
 import { Runtime } from 'aws-cdk-lib/aws-lambda';
 import { Secret } from 'aws-cdk-lib/aws-secretsmanager';
 import { Bucket } from 'aws-cdk-lib/aws-s3';
+import { Topic } from 'aws-cdk-lib/aws-sns';
 import { NagSuppressions } from 'cdk-nag';
 import { Construct } from 'constructs';
 import { HealthCanary } from './canaries/health-canary';
@@ -154,24 +156,31 @@ export class TriageStack extends Stack {
 
         const locks = new InvestigationLocksTable(this, 'InvestigationLocks');
 
-        // Placeholder secrets — populate real values (webhookUrl + hmacSecret
-        // for DevOps Agent; webhookUrl for Slack) after deploying.
+        // Placeholder secret — populate the real value (webhookUrl +
+        // hmacSecret for DevOps Agent) after deploying.
         const devopsWebhookSecret = new Secret(this, 'DevOpsAgentWebhookSecret', {
             secretName: 'l1t-devops-agent-webhook',
             description: 'AWS DevOps Agent webhook URL + HMAC secret. Populate after deploy: { "webhookUrl": "...", "hmacSecret": "..." }',
             secretStringValue: undefined,
         });
-        const slackWebhookSecret = new Secret(this, 'SlackWebhookSecret', {
-            secretName: 'l1t-slack-webhook',
-            description: 'Slack fallback webhook URL. Populate after deploy: { "webhookUrl": "..." }',
-            secretStringValue: undefined,
-        });
 
         NagSuppressions.addResourceSuppressions(
-            [devopsWebhookSecret, slackWebhookSecret],
+            [devopsWebhookSecret],
             [{ id: 'AwsSolutions-SMG4', reason: 'Third-party webhook credentials; automatic rotation does not apply' }],
             true,
         );
+
+        // Invocation-failure alert channel: notified only when all 3
+        // DevOps Agent webhook retries are exhausted (the Agent never ran).
+        // Routine findings/RCA delivery is handled separately by the DevOps
+        // Agent's own native Slack integration (console-configured, no code
+        // here) — see docs/sample-investigation.md. An operator subscribes
+        // an email (or other SNS-supported endpoint) after deploying.
+        const invocationFailureTopic = new Topic(this, 'InvocationFailureTopic', {
+            topicName: 'l1t-invocation-failure',
+            displayName: 'Automated Triage: DevOps Agent invocation failure',
+            enforceSSL: true,
+        });
 
         const webhookFunction = new WebhookFunction(this, 'WebhookFunction', {
             name: 'l1t-webhook-node',
@@ -179,10 +188,17 @@ export class TriageStack extends Stack {
             entry: 'src/lambda/webhook-node/index.js',
             handler: 'handler',
             memorySize: 256,
-            timeout: Duration.seconds(30),
+            // 60s, not 30s: up to 3 webhook attempts at a 10s connect
+            // timeout each, plus 1s/2s/4s exponential backoff between
+            // attempts, is ~37s worst case when the DevOps Agent endpoint is
+            // unreachable. A 30s timeout was observed (via a live
+            // invocation-failure drill in the sibling validation project)
+            // to kill the function mid-retry before it could ever publish
+            // the SNS alert.
+            timeout: Duration.seconds(60),
             locksTable: locks.table,
             devopsWebhookSecret,
-            slackWebhookSecret,
+            invocationFailureTopic,
             dedupTtlSeconds: props.dedupTtlSeconds,
             alarmNamePrefix,
         });

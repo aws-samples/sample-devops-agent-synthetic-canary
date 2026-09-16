@@ -19,9 +19,9 @@ SPDX-License-Identifier: Apache-2.0
  * Wait/Check/Choice loop) — but instead of re-publishing to SNS, the check
  * Lambda re-emits a synthetic "CloudWatch Alarm State Change" event onto the
  * default EventBridge bus. That event flows through the exact same
- * `WebhookFunction` rule, dedup lock, HMAC signing, retry, and Slack
- * fallback as a genuine alarm transition — no special-casing needed in the
- * webhook Lambda itself.
+ * `WebhookFunction` rule, dedup lock, HMAC signing, retry, and
+ * invocation-failure SNS alert as a genuine alarm transition — no
+ * special-casing needed in the webhook Lambda itself.
  *
  * Architecture:
  *
