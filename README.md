@@ -1,7 +1,7 @@
 <!-- Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved. -->
 <!-- SPDX-License-Identifier: MIT-0 -->
 
-# Synthetic Canary → AWS DevOps Agent
+# Automated Triage: CloudWatch Synthetics to AWS DevOps Agent
 
 Route CloudWatch Synthetics canary/alarm failures straight into an automated
 [AWS DevOps Agent](https://aws.amazon.com/devops-agent/) investigation — no
