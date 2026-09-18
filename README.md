@@ -29,29 +29,9 @@ cause analysis begins.
 | Target application | Any HTTP(S) application to point the canaries at — this repo ships no demo app; see [Trying it against a real app](#trying-it-against-a-real-app-one-observability-demo) below |
 | AWS DevOps Agent | An Agent Space with a generic webhook trigger configured (HMAC signing enabled) — see [Getting a DevOps Agent webhook URL + HMAC secret](#getting-a-devops-agent-webhook-url--hmac-secret) below |
 
-```
-CloudWatch Synthetics canary  --(SuccessPercent alarm)-->  EventBridge (default bus)
-   (Health canary / UX canary)                                    |
-                                                                    v
-                                              Webhook Lambda (dedup + HMAC-sign)
-                                                                    |
-                                              +---------------------+---------------------+
-                                              v                                           v
-                        AWS DevOps Agent (primary; posts findings           SNS (invocation-failure alert,
-                        to Slack natively, console-configured)              only if the Agent is unreachable)
+![Architecture diagram: two CloudWatch Synthetics canaries feed per-canary CloudWatch alarms, which route through the account's default EventBridge bus to a webhook Lambda that deduplicates via DynamoDB, signs the payload with a Secrets Manager-held HMAC secret, and POSTs it to AWS DevOps Agent (which delivers findings to Slack natively) — falling back to an SNS invocation-failure alert if the Agent is unreachable. An optional Step Functions workflow (RepeatedNotification) re-checks sustained alarms and re-emits synthetic events back through the same webhook path.](docs/images/architecture.png)
 
-                                              (alarm stays unresolved?)
-                                                                    |
-                                                                    v
-                              EventBridge (default bus) --> Step Function (RepeatedNotification)
-                                                                    |
-                                                    Wait --> DescribeAlarms --> still ALARM?
-                                                     ^                              |
-                                                     +------------------------------+
-                                                                    |
-                                                     re-emits a synthetic alarm event
-                                                     --> back into the same Webhook Lambda rule above
-```
+*Editable source: [`docs/diagrams/architecture.drawio`](docs/diagrams/architecture.drawio) — open with [draw.io](https://app.diagrams.net/) or the [draw.io VS Code extension](https://marketplace.visualstudio.com/items?itemName=hediet.vscode-drawio).*
 
 ## Why this exists
 
