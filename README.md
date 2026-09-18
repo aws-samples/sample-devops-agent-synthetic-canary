@@ -101,6 +101,19 @@ See [`docs/sample-investigation.md`](docs/sample-investigation.md) for the agent
 investigation output (root cause, evidence, and proposed mitigation plan), plus the
 complementary invocation-failure alert path.
 
+## Interacting with an in-progress investigation
+
+This pattern is auto-trigger by design — no one has to open the AWS DevOps
+Agent and describe the problem for an investigation to start. But "auto-trigger"
+only covers *starting* the investigation, not the whole interaction model:
+once it's running, an operator can still open the AWS DevOps Agent web app for
+that investigation and steer it conversationally — ask it to look at a
+different service, request more detail on a specific finding, or redirect the
+analysis — the same way they would in any of the Agent's chat-driven workshops.
+This project assumes the operator already knows how to do that; it only
+automates getting the investigation *started*, not how you interact with the
+Agent once you're in the web app.
+
 ## What's in this repo
 
 | Path | What it is |
@@ -169,6 +182,12 @@ HMAC secret to use above. See the AWS DevOps Agent documentation for
 webhook Lambda in this repo implements that contract exactly (HMAC-SHA256
 over `${timestamp}:${body}`, base64-encoded, sent as the
 `x-amzn-event-signature` header alongside `x-amzn-event-timestamp`).
+
+Check the [AWS DevOps Agent supported Regions
+page](https://docs.aws.amazon.com/devopsagent/latest/userguide/about-aws-devops-agent-supported-regions.html)
+for current Region availability before choosing where to create your Agent
+Space — availability has expanded since AWS DevOps Agent's public preview
+and some specific features remain Region-limited.
 
 ## Configuring the UX canary's journey
 
@@ -373,6 +392,19 @@ this repo's code lives in it.
   fails *solely* on the secondary check's absence, and it requires the
   element to be *visible* (not just present in the DOM) — many templates
   render a hidden, empty error placeholder on every page load.
+- **No topology or dependency wiring is done by this project — the AWS
+  DevOps Agent discovered it on its own.** Validated against
+  [aws-samples/one-observability-demo](https://github.com/aws-samples/one-observability-demo):
+  the pet-store app's ECS services, EventBridge rules, DynamoDB tables, and
+  X-Ray traces are all standard AWS-native resources, and the Agent built
+  an accurate service topology and traced the regression to a specific
+  container image without any tagging, dependency manifest, or custom MCP
+  server from this repo. If your target app is *not* fully AWS-native
+  (custom on-prem components, resources the Agent's IAM role can't see, or
+  you want to scope what it can discover), see [Limiting Agent Access in
+  an AWS Account](https://docs.aws.amazon.com/devopsagent/latest/userguide/aws-devops-agent-security-limiting-agent-access-in-an-aws-account.html)
+  for tag/resource/region-based restriction — that's the mechanism to
+  reach for, not something this project builds or requires up front.
 
 ## Security
 
