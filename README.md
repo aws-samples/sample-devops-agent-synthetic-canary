@@ -374,6 +374,24 @@ this repo's code lives in it.
   conditional put on `canaryName` with an `expiresAt` TTL attribute is
   sufficient for this use case (bursty repeated ALARM events for the same
   underlying incident) without needing a full distributed lock service.
+- **This dedup lock and AWS DevOps Agent's own incident-triage stage solve
+  different problems, not the same one.** The Agent's triage stage
+  correlates *every* incoming trigger (webhook, ServiceNow, Datadog, etc.)
+  against active investigations within a ~20-minute look-back window, using
+  AI-driven analysis (component similarity, region, timing) to link,
+  skip, or start a new investigation — this is real semantic correlation
+  across different alarms and sources, and it is strictly more capable than
+  an exact-key match. Our lock operates one layer earlier and is
+  deliberately dumb by comparison: it's an exact `canaryName` match that
+  decides whether the webhook Lambda even *makes the HTTP call* to the
+  Agent at all. That earlier gate matters because `RepeatedNotification`
+  can re-emit a synthetic alarm event every `repeatIntervalSeconds` for a
+  sustained incident — without our lock, each of those would still reach
+  the Agent and rely on its triage window to fold them together after the
+  fact, burning a webhook call, HMAC signing, and a triage cycle each time.
+  The two are complementary: ours is a cheap pre-invocation filter for the
+  trivial same-canary-repeat case; the Agent's is the general-purpose
+  correlator for the harder cross-alarm/cross-source case ours can't do.
 - **CloudWatch alarms are edge-triggered, not level-triggered.** A sustained
   ALARM state does not re-fire the EventBridge event on every evaluation —
   only the *transition* into ALARM does. The optional `RepeatedNotification`
