@@ -1,9 +1,33 @@
+<!-- Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved. -->
+<!-- SPDX-License-Identifier: MIT-0 -->
+
 # Synthetic Canary → AWS DevOps Agent
 
 Route CloudWatch Synthetics canary/alarm failures straight into an automated
 [AWS DevOps Agent](https://aws.amazon.com/devops-agent/) investigation — no
 human has to notice the page, open a ticket, or start digging before root
 cause analysis begins.
+
+### Use case details
+
+| Information | Details |
+|---|---|
+| Use case type | Operational / Observability automation |
+| Agent type | Single agent (AWS DevOps Agent, invoked via webhook — not built or hosted in this repo) |
+| Use case components | AWS CDK constructs, AWS Lambda, CloudWatch Synthetics, CloudWatch Alarms, Amazon EventBridge, Amazon DynamoDB, Amazon SNS, AWS Step Functions |
+| Use case vertical | DevOps / Site Reliability Engineering |
+| Example complexity | Intermediate |
+| SDK used | AWS CDK v2, AWS SDK for JavaScript v3 |
+
+### Prerequisites
+
+| Requirement | Description |
+|---|---|
+| Node.js 22+ | Runtime for the CDK app and all Lambda handlers |
+| AWS CLI | Configured with credentials (`aws configure`) |
+| AWS CDK CLI | `npm install -g aws-cdk` (or use the local `npx cdk` from this repo) |
+| Target application | Any HTTP(S) application to point the canaries at — this repo ships no demo app; see [Trying it against a real app](#trying-it-against-a-real-app-one-observability-demo) below |
+| AWS DevOps Agent | An Agent Space with a generic webhook trigger configured (HMAC signing enabled) — see [Getting a DevOps Agent webhook URL + HMAC secret](#getting-a-devops-agent-webhook-url--hmac-secret) below |
 
 ```
 CloudWatch Synthetics canary  --(SuccessPercent alarm)-->  EventBridge (default bus)
@@ -352,8 +376,63 @@ this repo's code lives in it.
 
 ## Security
 
-See [CONTRIBUTING](CONTRIBUTING.md#security-issue-notifications) for how to
-report a security issue.
+> **Important:** This sample is provided for educational and demonstration
+> purposes only. It is not intended for production use without additional
+> security review, testing, and hardening.
+
+### Security controls implemented
+
+| Layer | Control | Implementation |
+|---|---|---|
+| Webhook authenticity | HMAC-SHA256 signing | `WebhookFunction` signs every DevOps Agent request with a secret from AWS Secrets Manager; the agent verifies it on receipt |
+| Webhook secret storage | AWS Secrets Manager | Webhook URL + HMAC secret are never stored in code, env vars, or CDK context — only in Secrets Manager, populated post-deploy |
+| Least-privilege IAM | Scoped per-construct roles | `BaseLambdaFunction`/`BaseCanary` grant only what each Lambda/canary needs (its own DynamoDB table, its own secret, its own topic) — no shared or wildcard roles |
+| Transport encryption | `enforceSSL: true` | Applied on the SNS topic and the canary artifacts S3 bucket |
+| Duplicate/replay suppression | DynamoDB conditional put + TTL | `InvestigationLocksTable` deduplicates concurrent/duplicate ALARM events so the same incident can't fan out into repeated agent invocations |
+| Failure visibility | SNS invocation-failure alert | If the DevOps Agent can't be reached after retries, an operator is notified via SNS rather than the failure being silently dropped |
+| Dead-letter handling | Lambda DLQ | `BaseLambdaFunction` wires a DLQ for every Lambda so failed async invocations aren't lost |
+| Compliance-as-code | cdk-nag (`AwsSolutionsChecks`) | Runs on synth for every construct in this repo; explicit `NagSuppressions` with a documented reason wherever a rule doesn't apply |
+
+### Shared responsibility
+
+This project follows the
+[AWS Shared Responsibility Model](https://aws.amazon.com/compliance/shared-responsibility-model/).
+AWS is responsible for security **of** the cloud — the underlying Lambda,
+CloudWatch Synthetics, EventBridge, DynamoDB, and SNS services. You are
+responsible for security **in** the cloud, including:
+
+- Reviewing and scoping IAM roles/policies to your own account's least-privilege requirements before deploying
+- Securing the DevOps Agent webhook URL and HMAC secret (stored in AWS Secrets Manager by default; rotate if you suspect exposure)
+- Reviewing AI-generated findings and any proposed mitigation before acting on them — this pattern surfaces investigations, it does not auto-remediate anything
+- Restricting who can read the DevOps Agent's findings (its own native Slack/console delivery) and who can subscribe to the invocation-failure SNS topic
+- Enabling additional controls (VPC endpoints for Lambda, AWS WAF on any public target app, CMK encryption, CloudTrail) as appropriate for your environment
+- Reviewing canary journey configuration (`journeyPages`, selectors, target URLs) so canaries don't unintentionally exercise destructive or paid actions against the target app
+
+### Production hardening
+
+For production use beyond this reference pattern, consider:
+
+| Category | Action |
+|---|---|
+| **Credential rotation** | Configure rotation for the DevOps Agent webhook secret in Secrets Manager |
+| **Network isolation** | Run the webhook and repeated-notification Lambdas in a VPC with VPC endpoints for the AWS services they call, if your account's network policy requires it |
+| **Audit logging** | Enable AWS CloudTrail for all API calls; use CloudWatch Logs Insights on the webhook/canary Lambda log groups for investigation |
+| **Alerting redundancy** | Subscribe more than one endpoint (e.g. email + a paging tool via a Lambda subscriber) to the invocation-failure SNS topic |
+| **Monitoring** | Add a CloudWatch dashboard for canary `SuccessPercent`, webhook Lambda error rate, and DynamoDB dedup-table throttling |
+
+For how to report a security issue in this project itself (not a finding
+from the DevOps Agent), see
+[CONTRIBUTING](CONTRIBUTING.md#security-issue-notifications).
+
+## Disclaimer
+
+The examples provided in this repository are for educational purposes only.
+They demonstrate a routing pattern (canary → alarm → EventBridge → webhook →
+AWS DevOps Agent), not a production-ready application. Findings and
+mitigation plans generated by AWS DevOps Agent reflect its analysis at
+investigation time based on the data it could access; review them
+thoroughly and assess the potential impact before implementing any proposed
+change against your own infrastructure.
 
 ## License
 
