@@ -9,10 +9,10 @@
 > for this validation run, not part of the workshop itself.
 >
 > This is the AWS DevOps Agent's own reasoning output — not a canned or scripted report. The
-> content below is a faithful transcript of the real investigation, reformatted for readability.
-> If a screenshot of the AWS DevOps Agent console is added later, it belongs alongside this file
-> under `docs/images/` and can be referenced with standard markdown image syntax:
-> `![AWS DevOps Agent investigation summary](images/devops-agent-investigation.png)`.
+> content below is a faithful transcript of the real investigation, reformatted for readability,
+> alongside screenshots of the actual CloudWatch alarm and the AWS DevOps Agent console for this
+> incident. Account-specific details visible in the raw console (the operator's IAM role ARN,
+> account ID) are redacted from the screenshots the same way they are from the transcript below.
 
 ---
 
@@ -29,6 +29,8 @@ firing alarm `l1t-health-l1t-cart-canary-availability`. The page shell loaded (c
 `/api/cart` calls succeeded) but zero product cards rendered, so there was no add-to-cart
 button to click.
 
+![CloudWatch alarm l1t-health-l1t-cart-canary-availability in ALARM state, showing SuccessPercent dropped from 100% to 0% and stayed there](images/canary-alarm.png)
+
 ### Root cause
 
 A regressed `petfood-rs:latest` container image (digest `sha256:87dd0a6c…`, pushed 12:00:51 UTC)
@@ -43,6 +45,8 @@ returned 200), canary drift, empty catalog or broken config (DynamoDB table `ACT
 SSM config parameter correct and unchanged).
 
 **Contributing factor:** the unpinned `:latest` image reference.
+
+![AWS DevOps Agent console showing this investigation's Root cause and Key findings tabs, including the impact statement, root cause, and the manual force-new-deployment finding that activated the regressed image](images/devops-agent-investigation.png)
 
 ### Mitigation (proposed by the agent, validated, not auto-executed)
 
