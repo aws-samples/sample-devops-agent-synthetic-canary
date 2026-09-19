@@ -423,6 +423,34 @@ this repo's code lives in it.
 | Dead-letter handling | Lambda DLQ | `BaseLambdaFunction` wires a DLQ for every Lambda so failed async invocations aren't lost |
 | Compliance-as-code | cdk-nag (`AwsSolutionsChecks`) | Runs on synth for every construct in this repo; explicit `NagSuppressions` with a documented reason wherever a rule doesn't apply |
 
+### Code scanning
+
+This repo is scanned with GitLab SAST (Semgrep) and GitLab SAST-IaC (KICS)
+on every push to `main` (see `.gitlab-ci.yml`). As of the most recent scan:
+
+- **GitLab SAST-IaC (KICS): 0 findings.** No static IaC template files
+  (CloudFormation/Terraform/Kubernetes YAML) are committed to this repo —
+  infrastructure is defined in CDK TypeScript and synthesized at deploy
+  time, so there is nothing for a static IaC template scanner to check.
+- **GitLab SAST (Semgrep): 1 finding, accepted as a false positive.**
+  `eslint.detect-non-literal-regexp` (CWE-185, Medium) on
+  `src/lambda/webhook-node/index.js:117`, where a `RegExp` is built from
+  `ALARM_NAME_PREFIX`. This value comes from the `L1T_ALARM_NAME_PREFIX`
+  environment variable — deploy-time configuration set by whoever deploys
+  the CDK stack, not user or network input — and is passed through
+  `.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')` to escape all regex
+  metacharacters before being embedded in the pattern. That escaping
+  removes the backtracking risk (ReDoS) this rule exists to catch.
+- **Dependency version ranges: caret (`^`) ranges used intentionally,
+  except `aws-cdk`.** All `@aws-sdk/*` clients, `aws-cdk-lib`,
+  `cdk-nag`, and `constructs` use `^` ranges so this sample keeps
+  receiving compatible security patches without a manual bump; the
+  committed `package-lock.json` still pins exact resolved versions for
+  reproducible installs via `npm ci`. The `aws-cdk` **CLI** is pinned to
+  an exact version instead, since the CLI needs to match the specific
+  library version this repo was tested against — the same split other
+  published aws-samples CDK repos use.
+
 ### Shared responsibility
 
 This project follows the
