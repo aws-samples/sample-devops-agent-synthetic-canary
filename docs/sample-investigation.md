@@ -106,17 +106,6 @@ after 3 attempts. The Agent did not run and no investigation was started.
 Last error: Webhook request timed out.
 ```
 
-This was validated live: the webhook secret was pointed at a deliberately unreachable endpoint,
-a real canary alarm transition was forced, and the alert above was confirmed delivered.
-Routine findings/RCA delivery (the transcript above) and this invocation-failure alert are
-deliberately two different channels — see the architecture diagram in the main
-[README](../README.md) for how they're wired.
-
-## Notes for readers of this sample
-
-- All timestamps, digests, and resource names above come from the real investigation transcript,
-  lightly reformatted for readability. Nothing about the pet store app's architecture is
-  hidden — it matches the public [One Observability Workshop](https://catalog.workshops.aws/observability/en-US) design.
-- What's redacted (`<...>` placeholders, or removed entirely): the CloudFront distribution ID,
-  the operator's IAM role ARN and alias, and the agent's internal execution-role name — these
-  are specific to the AWS account used to run this validation, not part of the workshop.
+Routine findings and RCA delivery (the transcript above) go through one channel; this
+invocation-failure alert goes through another. See the architecture diagram in the main
+[README](../README.md) for how both are wired.
