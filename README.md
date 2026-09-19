@@ -446,10 +446,10 @@ out — it's not a dependency of this repo.
 |---|---|---|
 | Webhook authenticity | HMAC-SHA256 signing | `WebhookFunction` signs every DevOps Agent request with a secret from AWS Secrets Manager; the agent verifies it on receipt |
 | Webhook secret storage | AWS Secrets Manager | Webhook URL + HMAC secret are never stored in code, env vars, or CDK context — only in Secrets Manager, populated post-deploy |
-| Least-privilege IAM | Scoped per-construct roles | `BaseLambdaFunction`/`BaseCanary` grant only what each Lambda/canary needs (its own DynamoDB table, its own secret, its own topic) — no shared or wildcard roles |
+| Least-privilege IAM | Scoped per-construct roles | `BaseLambdaFunction`/`BaseCanary` grant only what each Lambda/canary needs (its own DynamoDB table, its own secret, its own topic) |
 | Transport encryption | `enforceSSL: true` | Applied on the SNS topic and the canary artifacts S3 bucket |
 | Duplicate/replay suppression | DynamoDB conditional put + TTL | `InvestigationLocksTable` deduplicates concurrent/duplicate ALARM events so the same incident can't fan out into repeated agent invocations |
-| Failure visibility | SNS invocation-failure alert | If the DevOps Agent can't be reached after retries, an operator is notified via SNS rather than the failure being silently dropped |
+| DevOps Agent invocation failure visibility | SNS invocation-failure alert | If the DevOps Agent can't be reached after retries, an operator is notified via SNS rather than the failure being silently dropped |
 | Dead-letter handling | Lambda DLQ | `BaseLambdaFunction` wires a DLQ for every Lambda so failed async invocations aren't lost |
 | Compliance-as-code | cdk-nag (`AwsSolutionsChecks`) | Runs on synth for every construct in this repo; explicit `NagSuppressions` with a documented reason wherever a rule doesn't apply |
 
@@ -507,6 +507,7 @@ For production use beyond this reference pattern, consider:
 | **Audit logging** | Enable AWS CloudTrail for all API calls; use CloudWatch Logs Insights on the webhook/canary Lambda log groups for investigation |
 | **Alerting redundancy** | Subscribe more than one endpoint (e.g. email + a paging tool via a Lambda subscriber) to the invocation-failure SNS topic |
 | **Monitoring** | Add a CloudWatch dashboard for canary `SuccessPercent`, webhook Lambda error rate, and DynamoDB dedup-table throttling |
+| **Agent Space scoping** | This project only gets an alarm to the Agent — how well the Agent can investigate depends on how its Agent Space is scoped. For production, size Agent Space boundaries around a logical application or on-call group (not too narrow, not too broad) — see [Best practices for deploying AWS DevOps Agent in production](https://aws.amazon.com/blogs/devops/best-practices-for-deploying-aws-devops-agent-in-production/). If your target app spans multiple AWS accounts, see [Deploying AWS DevOps Agent in multi-account enterprise environments](https://repost.aws/articles/ARTtouEQz_RIa93Pukuw1zjw/deploying-aws-devops-agent-in-multi-account-enterprise-environments-a-strategy-for-cross-account-root-cause-analysis) for cross-account topology and root-cause analysis patterns |
 
 For how to report a security issue in this project itself (not a finding
 from the DevOps Agent), see
