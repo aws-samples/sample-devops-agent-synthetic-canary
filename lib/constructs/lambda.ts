@@ -7,9 +7,10 @@ SPDX-License-Identifier: Apache-2.0
  * Lambda function construct base.
  *
  * Provides an abstract base class for creating Lambda functions with
- * consistent configuration and best practices for observability, security,
- * and performance (DLQ, X-Ray tracing, structured log group, least-privilege
- * IAM role scaffolding).
+ * consistent scaffolding for observability and performance (DLQ, X-Ray
+ * tracing, structured log group) and a base execution role
+ * (`AWSLambdaBasicExecutionRole`) that each subclass extends with its own
+ * least-privilege permissions via `addFunctionPermissions`.
  *
  * @packageDocumentation
  */

@@ -134,7 +134,7 @@ Agent once you're in the web app.
 
 | Path | What it is |
 |---|---|
-| `lib/constructs/lambda.ts` | `BaseLambdaFunction` — shared Lambda scaffolding (DLQ, X-Ray, log group, least-privilege role) |
+| `lib/constructs/lambda.ts` | `BaseLambdaFunction` — shared Lambda scaffolding (DLQ, X-Ray, log group, base execution role extended per-construct with least-privilege permissions) |
 | `lib/constructs/canary.ts` | `BaseCanary` — shared Synthetics canary scaffolding (IAM role, artifacts bucket, schedule, X-Ray) |
 | `lib/canaries/health-canary.ts` | `HealthCanary` construct |
 | `lib/canaries/ux-canary.ts` | `UxCanary` construct |
@@ -146,7 +146,7 @@ Agent once you're in the web app.
 | `src/canaries/ux/` | UX canary Lambda source |
 | `src/lambda/webhook-node/` | Webhook Lambda source |
 | `src/lambda/repeat-notification-node/` | Repeated-notification check Lambda source |
-| `test/` | Unit + infra tests for all of the above |
+| `test/` | Unit + infra tests for all of the above. Note: `WebhookFunction` uses `NodejsFunction`, which bundles with esbuild in Docker at CDK synth time — so there's no single test that synthesizes the *entire* `TriageStack` together, to avoid a hard Docker dependency in this sample's test suite. Instead, `WebhookFunction`'s logic (alarm parsing, HMAC signing, retry/backoff) is unit-tested directly with no bundling involved, and every other construct's CDK wiring is synth-tested on its own |
 
 ## Quick start
 
