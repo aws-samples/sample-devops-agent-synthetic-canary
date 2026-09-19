@@ -3,10 +3,14 @@
 
 # Automated Triage: CloudWatch Synthetics to AWS DevOps Agent
 
-Route CloudWatch Synthetics canary/alarm failures straight into an automated
-[AWS DevOps Agent](https://aws.amazon.com/devops-agent/) investigation — no
-human has to notice the page, open a ticket, or start digging before root
-cause analysis begins.
+CloudWatch Synthetics runs scripted checks against your application on a
+schedule — hitting an API endpoint, or loading a page in a real browser —
+to catch things like a service returning errors, a page failing to load,
+or a page loading fine but showing an error message instead of real
+content. This project wires those checks directly to
+[AWS DevOps Agent](https://aws.amazon.com/devops-agent/): the moment a
+check fails, an investigation starts automatically. No one has to notice
+the outage, open a ticket, or start digging through logs first.
 
 ### Use case details
 
@@ -28,48 +32,80 @@ cause analysis begins.
 | AWS CDK CLI | `npm install -g aws-cdk` (or use the local `npx cdk` from this repo) |
 | Target application | Any HTTP(S) application to point the canaries at — this repo ships no demo app; see [Trying it against a real app](#trying-it-against-a-real-app-one-observability-demo) below |
 | AWS DevOps Agent | An Agent Space with a generic webhook trigger configured (HMAC signing enabled) — see [Getting a DevOps Agent webhook URL + HMAC secret](#getting-a-devops-agent-webhook-url--hmac-secret) below |
+| AWS DevOps Agent account access | The Agent Space needs an IAM role with access to your target app's AWS resources (auto-created or custom) so it can actually investigate once invoked — see [Configuring primary account access](https://docs.aws.amazon.com/devopsagent/latest/userguide/getting-started-with-aws-devops-agent-creating-an-agent-space.html) |
 
 ![Architecture diagram: two CloudWatch Synthetics canaries feed per-canary CloudWatch alarms, which route through the account's default EventBridge bus to a webhook Lambda that deduplicates via DynamoDB, signs the payload with a Secrets Manager-held HMAC secret, and POSTs it to AWS DevOps Agent (which delivers findings to Slack natively) — falling back to an SNS invocation-failure alert if the Agent is unreachable. An optional Step Functions workflow (RepeatedNotification) re-checks sustained alarms and re-emits synthetic events back through the same webhook path.](docs/images/architecture.png)
 
 *Editable source: [`docs/diagrams/architecture.drawio`](docs/diagrams/architecture.drawio) — open with [draw.io](https://app.diagrams.net/) or the [draw.io VS Code extension](https://marketplace.visualstudio.com/items?itemName=hediet.vscode-drawio).*
+
+### How it flows
+
+1. **`HealthCanary`** checks the target app's API health on a schedule —
+   HTTP status codes, following redirects correctly. **`UxCanary`** goes
+   further: it drives a real headless browser through a page journey and
+   checks that expected content actually renders.
+2. If either canary's `SuccessPercent` drops, its own CloudWatch alarm
+   (`HealthAvailabilityAlarm` or `UxAvailabilityAlarm`) fires.
+3. The alarm's state-change event lands on the account's default
+   **Amazon EventBridge** bus.
+4. The **Webhook Lambda** picks it up and checks **Amazon DynamoDB** for
+   an existing lock on that canary name — this filters out duplicate or
+   repeat alarms for the same incident before anything else happens.
+5. If there's no active lock, the Lambda reads the DevOps Agent's webhook
+   URL and HMAC secret from **AWS Secrets Manager**, signs the request,
+   and sends it — retrying with backoff if the first attempts fail.
+6. **AWS DevOps Agent** receives the signed request and starts an
+   investigation. This assumes the Agent Space already has account
+   access configured to discover your target app's resources (see
+   Prerequisites above) — this project only handles getting the alarm
+   *to* the Agent, not what the Agent can see once it's investigating.
+   The Agent delivers its findings and root-cause analysis through its
+   own native Slack integration (no code in this repo).
+7. If the Agent can't be reached after all retries, the Webhook Lambda
+   publishes to an **Amazon SNS** topic instead, so the failure to invoke
+   the Agent doesn't go unnoticed.
+8. *(Optional)* If the alarm stays unresolved, **AWS Step Functions**
+   (`RepeatedNotification`) periodically re-checks it and re-emits a
+   synthetic alarm event back through the same path — reusing the same
+   dedup lock, signing, retry, and SNS alert, rather than a separate code
+   path.
 
 ## Why this exists
 
 Most outside-in monitoring stops at "is the alarm red or green." This project
 closes the gap between *detection* and *investigation*:
 
-- **Two complementary canaries.** A `HealthCanary` does outside-in API health
-  checks (HTTP status, following redirects correctly, so a healthy CloudFront
-  302 isn't misreported as a failure). A `UxCanary` drives a real headless
-  browser through a configurable page journey and asserts that expected
-  *content* rendered — catching failures that come back as an HTTP 200 with a
-  server-rendered error banner in place of real content, which no
-  status-code check can ever see.
-- **A signed, retried, deduplicated routing path.** CloudWatch alarms land on
-  the account's default EventBridge bus. A small webhook Lambda picks them
-  up, deduplicates concurrent/duplicate ALARM events via a DynamoDB
-  conditional-put lock, and POSTs an HMAC-signed payload to AWS DevOps Agent
-  with retry + exponential backoff, publishing an SNS invocation-failure
-  alert if the agent can't be reached at all. Routine findings/RCA delivery
-  is handled separately by AWS DevOps Agent's own native Slack integration
-  (console-configured, no code in this repo) — see
+- **Two canaries, two kinds of checks.** `HealthCanary` checks basic API
+  health — HTTP status codes, and it correctly follows redirects so a
+  normal CloudFront redirect isn't mistaken for a failure. `UxCanary` goes
+  further: it uses a real headless browser to visit pages and check that
+  the expected content actually shows up. This catches a common failure a
+  status-code check misses entirely — a page that returns a normal HTTP 200
+  but shows an error message instead of real content.
+- **A secure, reliable path to the Agent.** CloudWatch alarms land on the
+  account's default EventBridge bus. A small webhook Lambda picks them up,
+  filters out duplicate alarms using a DynamoDB lock, and sends a signed
+  request to AWS DevOps Agent — retrying with backoff if the first attempts
+  fail. If the Agent still can't be reached, it sends an SNS alert instead
+  of failing silently. The Agent's actual findings and root-cause analysis
+  are delivered separately, through its own native Slack integration (no
+  code needed here) — see
   [`docs/sample-investigation.md`](docs/sample-investigation.md).
-- **No proprietary error-string matching.** The UX canary's content checks
-  are structural (does the expected element exist and is it visible) and
-  its network/JS-error checks are fully generic — it never depends on any
-  application's specific error copy, so it works against a page whose error
-  message you've never seen.
+- **No hardcoded error messages to match.** The UX canary checks are
+  generic: does the expected element show up on the page, and are there
+  any network or JS errors. It never looks for a specific app's error
+  text, so it works even on error messages it has never seen before.
 - **Sustained incidents keep getting surfaced, not just the first occurrence.**
   CloudWatch alarms are edge-triggered — EventBridge only fires on the
   *transition* into ALARM, not on every evaluation while it stays there. The
   optional `RepeatedNotification` construct closes that gap with a Step
   Function that periodically re-checks the alarm and re-invokes the same
   webhook path while the incident remains unresolved.
-- **Fewer false-positive investigations from one-off blips.** Both canaries
-  support CloudWatch Synthetics' native `maxRetries` — a single transient
-  failure (a slow DNS lookup, one flaky response) gets retried before the
-  run counts against the availability alarm, so it never reaches DevOps
-  Agent at all.
+- **Fewer false alarms from one-off glitches.** Both canaries support
+  CloudWatch Synthetics' built-in `maxRetries` setting. A single flaky
+  failure — like a slow DNS lookup or one bad response — gets retried
+  before it counts against the alarm. That means it never triggers a
+  DevOps Agent investigation at all.
 
 ## Seeing it work
 
@@ -242,14 +278,13 @@ mechanism that catches load-time failures, with no extra wiring.
 signal; combine both when you want to reach a piece of UI via interaction
 and then assert on it separately.
 
-**Not supported: authentication/session flows.** There is no login-step
-primitive — filling credentials, submitting a login form, handling MFA, or
-persisting a session/cookie across separate canary runs is out of scope for
-this project today. If your journey pages sit behind a login wall, this is a
-real gap you'd need to close yourself (or contribute) before this pattern
-can reach them; it is a legitimate, bounded extension (a `login` step type
-that authenticates once and reuses the resulting page/cookie for the rest of
-the journey) that just hasn't been built.
+**Not yet included in this project: logging in.** CloudWatch Synthetics
+itself supports login flows — entering credentials and submitting a login
+form is a documented pattern, see
+[Common features for CloudWatch Synthetics canaries](https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/CloudWatch_Synthetics_Canaries_CommonFeatures.html#CloudWatch_Synthetics_Canaries_CommonFeatures_Integrations).
+This project just doesn't have a built-in `login` step for that yet. If
+your pages sit behind a login wall, you'd follow that same pattern to add
+a login step yourself before this pattern can reach them.
 
 ## Reducing false positives with `maxRetries`
 
@@ -322,7 +357,7 @@ Or instantiate `RepeatedNotification` directly if you're not using
 
 This project is intentionally application-agnostic — it doesn't ship or
 depend on any particular demo app. To see the whole pattern working
-end-to-end against real infrastructure and real (not synthetic) failures,
+end-to-end against real infrastructure and real failures,
 deploy [aws-samples/one-observability-demo](https://github.com/aws-samples/one-observability-demo),
 a polyglot pet-adoption microservices app built for the AWS observability
 workshop, and point this project's canaries at it:
@@ -337,59 +372,54 @@ workshop, and point this project's canaries at it:
 Then break something for real — scale an ECS service to zero, stop an EKS
 node group, or introduce an actual code bug — and watch the health canary or
 UX canary catch it, the alarm fire, the webhook Lambda dedupe and forward it,
-and AWS DevOps Agent produce a root-cause investigation without anyone
-opening a ticket.
+and AWS DevOps Agent produce a root-cause investigation.
 
-`one-observability-demo` is a reference target for trying this pattern, not
-a dependency of this repo — none of its code is vendored here, and none of
-this repo's code lives in it.
+`one-observability-demo` is just a reference target for trying this pattern
+out — it's not a dependency of this repo.
 
 ## Design notes
 
-- **Alarm routing uses the account's *default* EventBridge bus.** CloudWatch
-  delivers alarm state-change events there, not to any custom bus you might
-  create — `WebhookFunction` wires its rule to `EventBus.fromEventBusName(...,
-  'default')` accordingly.
+- **Alarm events always go to the account's default EventBridge bus.**
+  That's why `WebhookFunction` listens on the default bus
+  (`EventBus.fromEventBusName(..., 'default')`).
 - **Deduplication is TTL-based, not distributed-lock-based.** A DynamoDB
   conditional put on `canaryName` with an `expiresAt` TTL attribute is
   sufficient for this use case (bursty repeated ALARM events for the same
   underlying incident) without needing a full distributed lock service.
-- **This dedup lock and AWS DevOps Agent's own incident-triage stage solve
-  different problems, not the same one.** The Agent's triage stage
-  correlates *every* incoming trigger (webhook, ServiceNow, Datadog, etc.)
-  against active investigations within a ~20-minute look-back window, using
-  AI-driven analysis (component similarity, region, timing) to link,
-  skip, or start a new investigation — this is real semantic correlation
-  across different alarms and sources, and it is strictly more capable than
-  an exact-key match. Our lock operates one layer earlier and is
-  deliberately dumb by comparison: it's an exact `canaryName` match that
-  decides whether the webhook Lambda even *makes the HTTP call* to the
-  Agent at all. That earlier gate matters because `RepeatedNotification`
-  can re-emit a synthetic alarm event every `repeatIntervalSeconds` for a
-  sustained incident — without our lock, each of those would still reach
-  the Agent and rely on its triage window to fold them together after the
-  fact, burning a webhook call, HMAC signing, and a triage cycle each time.
-  The two are complementary: ours is a cheap pre-invocation filter for the
-  trivial same-canary-repeat case; the Agent's is the general-purpose
-  correlator for the harder cross-alarm/cross-source case ours can't do.
+- **AWS DevOps Agent has its own incident-correlation mechanism.** Its
+  triage stage checks every incoming trigger — from webhooks, ServiceNow,
+  Datadog, and other sources — against active investigations within a
+  ~20-minute look-back window, and decides whether to link it to an
+  existing investigation, skip it, or start a new one. Our DynamoDB dedup
+  lock works earlier and simpler: it's an exact `canaryName` match that
+  decides whether the webhook Lambda calls the Agent at all. That matters
+  because `RepeatedNotification` can re-emit the same alarm every
+  `repeatIntervalSeconds` while an incident is unresolved — without our
+  lock, each of those re-emissions would still reach the Agent and rely on
+  its triage window to fold them together, using up a webhook call, HMAC
+  signing, and a triage cycle each time. The two work together: ours
+  filters out the obvious repeat case before it ever reaches the Agent;
+  the Agent's handles the harder job of correlating across different
+  alarms and sources.
 - **CloudWatch alarms are edge-triggered, not level-triggered.** A sustained
   ALARM state does not re-fire the EventBridge event on every evaluation —
   only the *transition* into ALARM does. The optional `RepeatedNotification`
   construct (see [above](#repeated-notification-for-sustained-alarms)) closes
   this gap by periodically re-checking the alarm and re-invoking the webhook
   path while it remains unresolved.
-- **The repeated-notification check Lambda re-emits synthetic events rather
-  than calling the webhook Lambda directly.** Routing back through
-  EventBridge (instead of a direct Lambda-to-Lambda invocation) means the
-  repeat check reuses `WebhookFunction`'s existing dedup lock, HMAC signing,
-  retry, and invocation-failure SNS alert verbatim — no parallel code path
-  to keep in sync.
-- **The UX canary's error-indicator check is corroborating evidence only.**
-  The primary signal is always "did the expected content render." A
-  `.alert-danger`-style secondary check adds evidence but the canary never
-  fails *solely* on the secondary check's absence, and it requires the
-  element to be *visible* (not just present in the DOM) — many templates
-  render a hidden, empty error placeholder on every page load.
+- **The repeat-check Lambda goes back through EventBridge instead of
+  calling the webhook Lambda directly.** This way, every repeat reuses the
+  same dedup lock, HMAC signing, retries, and SNS alert as a real alarm —
+  with no separate code path to maintain.
+- **The UX canary checks for content first, then looks for a visible
+  error message as a second signal.** It always checks whether the
+  expected content rendered — that's the main check. It also looks for a
+  common error indicator (like Bootstrap's `.alert-danger` class), but
+  only counts it if it's actually *visible* on the page, not just present
+  in the page's HTML. That distinction matters because many web pages
+  include a hidden error box on every page load, ready to show only if
+  something goes wrong — checking DOM presence alone would falsely flag
+  every normal page load as an error.
 - **No topology or dependency wiring is done by this project — the AWS
   DevOps Agent discovered it on its own.** Validated against
   [aws-samples/one-observability-demo](https://github.com/aws-samples/one-observability-demo):
